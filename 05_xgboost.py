@@ -1,19 +1,15 @@
-from tabnanny import verbose
 import warnings
-from matplotlib.font_manager import json_load
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 import xgboost as xgb
-from xgboost import plot_importance, plot_tree
+from xgboost import plot_importance
 from sklearn.metrics import mean_squared_error as mse, r2_score
-from sklearn.datasets import load_boston
 from sklearn.model_selection import train_test_split, TimeSeriesSplit, GridSearchCV
-from yellowbrick.regressor import residuals_plot, prediction_error
 import os
 import json
 import datetime as dt
+plt.rcParams["figure.figsize"] = (10, 7)
 
 plt.style.use('fivethirtyeight')
 warnings.filterwarnings('ignore')
@@ -23,35 +19,40 @@ dataset_a = pd.read_csv('data_processed/dataset_a.csv', index_col='datetime')
 dataset_b = pd.read_csv('data_processed/dataset_b.csv', index_col='datetime')
 dataset_c = pd.read_csv('data_processed/dataset_c.csv', index_col='datetime')
 dataset_d = pd.read_csv('data_processed/dataset_d.csv', index_col='datetime')
-dataset_e = pd.read_csv('data_processed/dataset_e.csv', index_col='datetime')
+
+# convert index to datetime again
+dataset_a.index = pd.to_datetime(dataset_a.index)
+dataset_b.index = pd.to_datetime(dataset_b.index)
+dataset_c.index = pd.to_datetime(dataset_c.index)
+dataset_d.index = pd.to_datetime(dataset_d.index)
+
+# drop values as we only have actual values until '2017-04-08 17:00:00'
+dataset_a = dataset_a[:-4]
+dataset_b = dataset_b[:-4]
+dataset_c = dataset_c[:-4]
+dataset_d = dataset_d[:-4]
 
 
 ### SPLIT TEST AND TRAINING DATA ### ----------------------------------------------------
 
-def split_test_train(dataset, split = 0.8):
-    # drop values as we only have actual values until '2017-04-08 17:00:00'
-    dataset.dropna(inplace=True)
-    dataset = dataset.iloc[:-4]
-
+def split_test_train(dataset, split = 0.75):
     # split dependent and independent variables
     data = dataset.drop(columns=['prod_sum']).copy()
-    # get up to last value where we still have production data
-    data = data.loc[:'2017-04-08 22:00 00', ]
-    label = dataset.loc[:'2017-04-08 22:00 00', 'prod_sum']
+    label = dataset['prod_sum']
 
     # split training and testing data
     length = int(split*len(data))
-    x_train = data.iloc[:length, ]
-    x_test = data.iloc[length:, ]
-    y_train = label.iloc[:length, ]
-    y_test = label.iloc[length:, ]
 
-    # # make matrix file for xgboost
-    # dtrain = xgb.DMatrix(x_train, label=y_train)
-    # dtest = xgb.DMatrix(x_test, label=y_test)
+    # add +4h gap so we do have no time bias
+    gap = 4
+    length_test = length+gap
+
+    x_train = data.iloc[:length, ]
+    x_test = data.iloc[length_test:, ]
+    y_train = label.iloc[:length, ]
+    y_test = label.iloc[length_test:, ]
 
     # split train and test
-    x_train, x_test, y_train, y_test = train_test_split(data, label, test_size=0.2, shuffle=False)
     return x_train, x_test, y_train, y_test
 
 
@@ -169,11 +170,11 @@ def plot_learncurve(model, name):
     ax.plot(x_axis, results['validation_0']['rmse'], label='Train')
     ax.plot(x_axis, results['validation_1']['rmse'], label='Test')
     ax.legend()
-    plt.ylabel('RMSE')
-    plt.xlabel('iteration')
-    plt.title('XGB RMSE (' + name + ')')
+    ax.set_ylabel('RMSE')
+    ax.set_xlabel('iteration')
+    ax.set_title('XGB RMSE (' + name + ')')
     plt.tight_layout()
-    plt.savefig('plots/' + name + '_learningcurve.png')
+    fig.savefig('plots/' + name + '_learningcurve.png')
 
 
 # plot prediction vs actual
@@ -184,7 +185,7 @@ def plot_scatter(model, x_test, y_test, name):
     df['prediction'] = prediction
     fig, ax = plt.subplots()
     ax.scatter(df['prediction'], df['prod_sum'])
-
+    plt.figure(figsize=(10, 6))
     plt.title('Scatter Actual vs. Prediction (' + name + ')')
     plt.xlabel('prediction')
     plt.ylabel('actual')
@@ -199,7 +200,7 @@ def plot_pred_act(model, x_test, y_test, name):
     df = actual
     df['prediction'] = prediction
     df.index = pd.to_datetime(df.index)
-    ax = df.plot(title='Actual vs. Prediction (' + name + ')', style='-')
+    ax = df.plot(title='Actual vs. Prediction (' + name + ')', style='-', figsize=(10, 7))
     datemin = dt.date(df.index.min().year, df.index.min().month, df.index.min().day)
     datemax = dt.date(df.index.max().year, df.index.max().month, df.index.max().day+1)
     ax.set_xlim(datemin, datemax)
@@ -207,6 +208,21 @@ def plot_pred_act(model, x_test, y_test, name):
     ax.set_xlabel('datetime')
     ax.set_ylabel('MW')
     plt.savefig('plots/' + name + '_predvsact.png')
+
+# plot scatterplot
+def plot_scatter_pred_act(model, x_test, y_test, name):
+    prediction = (model.predict(x_test))
+    actual = pd.DataFrame(y_test)
+    df = actual
+    df['prediction'] = prediction
+    df.index = pd.to_datetime(df.index)
+    scatter_plot = df.plot.scatter('prod_sum', 'prediction', alpha=0.5)
+    plt.xlabel('actual')
+    plt.ylabel('prediction')
+    plt.title(('Scatterplot (' + name + ')'))
+    plt.savefig('plots/' + name + '_scatter.png')
+    return scatter_plot
+
 
 # return accuracy metrics for model
 def return_accuracy(model, x_test, y_test, name):
@@ -219,9 +235,9 @@ def return_accuracy(model, x_test, y_test, name):
     n = len(actual)
     p = len(x_test.columns)-1
     R2_ADJ = round(1-(1-R2)*(n-1)/(n-p-1), 4)
-    STD_DEV = round(np.std(actual), 4)
+    # STD_DEV = round(np.std(actual), 4)
 
-    result_dict = {name: {'RMSE': RMSE, 'R2': R2, 'R2_ADJ': R2_ADJ, 'STD_DEV': STD_DEV}}
+    result_dict = {name: {'RMSE': RMSE, 'R2': R2, 'R2_ADJ': R2_ADJ}}
     result_df = pd.DataFrame.from_dict(result_dict)
 
     # create folder if not yet created
@@ -235,9 +251,8 @@ def return_accuracy(model, x_test, y_test, name):
 ### RUN FOR ALL DATASETS ### ----------------------------------------------------
 
 # define datsets
-names = ['dataset_a', 'dataset_b', 'dataset_c', 'dataset_d', 'dataset_e']
-datasets = [dataset_a, dataset_b, dataset_c, dataset_d, dataset_e]
-
+names = ['dataset_a', 'dataset_b', 'dataset_c', 'dataset_d']
+datasets = [dataset_a, dataset_b, dataset_c, dataset_d]
 
 # run loop
 for i in range(0, len(names)):
@@ -250,11 +265,16 @@ for i in range(0, len(names)):
     # plot learning curve
     plot_learncurve(model=model, name=name)
     # plot importance
-    ax = plot_importance(model, max_num_features=20, title=('Feature importance (' + name + ')'))
+    ax = plot_importance(model, max_num_features=10, title=('Feature importance (' + name + ')'))
     ax.figure.tight_layout()
     ax.figure.savefig('plots/' + name + '_featureimp.png')
     # plot predicted vs actual
     plot_pred_act(x_test=x_test, y_test=y_test, name=name, model=model)
+    # plot scatter
+    plot_scatter_pred_act(x_test=x_test, y_test=y_test, name=name, model=model)
     # fetch result metrics
     returns = return_accuracy(x_test=x_test, y_test=y_test, name=name, model=model)
+
+
+
 

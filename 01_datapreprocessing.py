@@ -2,13 +2,13 @@ import datetime
 import glob
 import math
 import numpy as np
-from numpy import average, log, roll, rollaxis
+from numpy import NAN, average, log, roll, rollaxis
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 ### PRODUCTION DATA IMPORT ### ----------------------------------------------------
+
 # get all data file names
 path = r'data/'  
 all_files = glob.glob(path + "/*.csv")
@@ -60,26 +60,15 @@ dataset_a = pd.merge(forc_wide, prod_data, left_on='datetime', right_on='datetim
 cols = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 product_sum = dataset_a[cols].sum(axis=1)
 dataset_a['prod_sum'] = product_sum.shift(-4)
+
+# drop na forecasts
+dataset_a.dropna(inplace=True)
+
+# save to csv
 dataset_a.to_csv('data_processed/dataset_a.csv')
 
-### DATASET B: WIND PRODUCTION CONVERSION ### ----------------------------------------------------
 
-radius = 50
-area = math.pi * radius**2
-air_density = 1.2
-efficiency = 0.35
-
-forc_wide_transformed = 0.5 * area * forc_wide**3 * air_density * efficiency * 1e-6
-forc_wide_transformed.rename(columns={'forc_1_ms': 'forc_1_mw', 'forc_2_ms': 'forc_2_mw'}, inplace=True)
-
-# merge and save to csv
-dataset_b = pd.merge(forc_wide_transformed, prod_data, left_on='datetime', right_on='datetime', how='left')
-product_sum = dataset_b[cols].sum(axis=1)
-dataset_b['prod_sum'] = product_sum.shift(-4)
-dataset_b.to_csv('data_processed/dataset_b.csv')
-
-
-### DATASET C: CLEANED POWER ### ----------------------------------------------------
+### DATASET B: CLEANED POWER ### ----------------------------------------------------
 
 # find days where we have little wind and zero to negative production
 a_days = dataset_a.resample(rule='d').mean()
@@ -113,31 +102,28 @@ def plot_scatters(wind, production, nrows=20, ncols=2):
 
 plot_scatters(wind=a_days[['forc_1_ms', 'forc_2_ms']], production=a_days[cols])
 
-# we assume that when m/s is above 6 and we have negative daily production, that it is not caused by maintenance
+# we assume that when m/s is above 7.5 and we have negative daily production, that it is not caused by maintenance
 # else it may be caused by maintenance or our calculation error
-# hence we remove vaues above 6 m/s and negative daily production
-neg_days_maint = a_days_neg[(a_days_neg['forc_1_ms'] + a_days_neg['forc_1_ms'] / 2) > 6]
+# hence we remove vaues above 7.5 m/s and negative daily production
+neg_days_maint = a_days_neg[(a_days_neg['forc_1_ms'] + a_days_neg['forc_1_ms'] / 2) > 7.5]
 neg_days_maint = neg_days_maint.index.date
 
 # delete not needed days
-dataset_c = dataset_a.copy()
+dataset_b = dataset_a.copy()
 for date in neg_days_maint:
-    dataset_c = dataset_c[dataset_c.index.date != date]
+    dataset_b = dataset_b[dataset_b.index.date != date]
 
-print(f"We have deleted in total {len(dataset_a) - len(dataset_c)} rows ({round((len(dataset_a)-len(dataset_c))/len(dataset_a)*100, 1)}%) from Dataset A")
+print(f"We have deleted in total {len(dataset_a) - len(dataset_b)} rows ({round((len(dataset_a)-len(dataset_b))/len(dataset_a)*100, 1)}%) from Dataset A")
 
 # save dataset c
-dataset_c.to_csv('data_processed/dataset_c.csv')
+dataset_b.to_csv('data_processed/dataset_b.csv')
 
 
-### DATASET D: ADDED TRENDS AND SEASONALITY ### ----------------------------------------------------
+### DATASET C: ADDED TRENDS AND SEASONALITY ### ----------------------------------------------------
 
-dataset_d = dataset_c.copy()
-dataset_d.reset_index(inplace=True)
-dataset_d['month'] = dataset_d['datetime'].dt.month
-
-# drop values where we have no more than the forecasts
-dataset_d.dropna(inplace=True)
+dataset_c = dataset_b.copy()
+dataset_c.reset_index(inplace=True)
+dataset_c['month'] = dataset_c['datetime'].dt.month
 
 # as we have data from january 2015 - april 2017 we can include averages for seasonality
 # however we need to avoid forward-looking bias when calculating the average, min, and max
@@ -177,85 +163,74 @@ def add_features(df):
 
 # calculate the avg, min, max 
 # we split where we will split training and testing 
-split = int(len(dataset_d)*0.8)
-df_year_1n2 = dataset_d.iloc[:split]
-df_year_1n2 = add_features(df_year_1n2)
+year_1_end = pd.to_datetime('2015-12-31 23:00:00')
+split = dataset_c.index[dataset_c['datetime'] == year_1_end][0]
+df_year1 = dataset_c.loc[:split,]
+df_year1 = add_features(df_year1)
 
 # calculate the rolling avg, min, max and add to list
 rolling_values = []
-for t in range(split+1, len(dataset_d)+1):
+for t in range(split+1, len(dataset_c)+1):
     # limit df 
-    df = dataset_d[:t]
+    df = dataset_c[:t]
+    # run algorithm
     df = add_features(df=df)
+    # append only latest values
     rolling_values.append(df[-1:].values.tolist()[0])
 
+
 # convert to list and append to orginial dataframe
-rolling_df = pd.DataFrame(rolling_values, columns=list(df_year_1n2.columns))
-dataset_d = df_year_1n2.append(rolling_df)
+rolling_df = pd.DataFrame(rolling_values, columns=list(df_year1.columns))
+dataset_c = df_year1.append(rolling_df)
 
 # # Sanity Check (for static and not rolling avg, min, max)
 # # This was used to check if the function above works and it did
 # def sanity_check(row, column):
-#     index = dataset_d.index[row]
+#     index = dataset_c.index[row]
 #     month = index.month
-#     if (month_avg.loc[month, str(column)+'_avg'] == dataset_d.loc[index, str(column)+'_avg'] and
-#         month_min.loc[month, str(column)+'_min'] == dataset_d.loc[index, str(column)+'_min'] and
-#             month_max.loc[month, str(column)+'_max'] == dataset_d.loc[index, str(column)+'_max']):
+#     if (month_avg.loc[month, str(column)+'_avg'] == dataset_c.loc[index, str(column)+'_avg'] and
+#         month_min.loc[month, str(column)+'_min'] == dataset_c.loc[index, str(column)+'_min'] and
+#             month_max.loc[month, str(column)+'_max'] == dataset_c.loc[index, str(column)+'_max']):
 #         print('The algorithm worked correct!')
 #     else: 
 #         print('The algorithm is incorrect, please check manually!')
 #         print(month_avg.loc[month, str(column)+'_avg'])
-#         print(dataset_d.loc[index, str(column)+'_avg'])
+#         print(dataset_c.loc[index, str(column)+'_avg'])
 
 # sanity_check(row=20, column=2)
 # sanity_check(row=120, column=13)
 # sanity_check(row=1, column=1)
 
 # add month to dataset which is time independent!
-dataset_d.set_index('datetime', inplace=True)
-dataset_d['month'] = dataset_d.index.month
-dataset_d['hours'] = dataset_d.index.hour
+dataset_c.set_index('datetime', inplace=True)
+dataset_c['month'] = dataset_c.index.month
+dataset_c['hours'] = dataset_c.index.hour
 
 # save dataframe
-dataset_d.to_csv('data_processed/dataset_d.csv')
+dataset_c.to_csv('data_processed/dataset_c.csv')
 
 
-### DATASET E: WITH LAGGED VALUES ### ----------------------------------------------------
+### DATASET D: WITH LAGGED VALUES ### ----------------------------------------------------
 
 # copy dataset
-dataset_e = dataset_d.copy()
+dataset_d = dataset_c.copy()
 
 # # create lagged sums
-dataset_e['sum_-1'] = dataset_e[cols].sum(axis=1).shift(1)
-dataset_e['sum_-2'] = dataset_e[cols].sum(axis=1).shift(2)
-dataset_e['sum_-3'] = dataset_e[cols].sum(axis=1).shift(3)
-dataset_e['sum_-4'] = dataset_e[cols].sum(axis=1).shift(4)
+dataset_d['sum_-1'] = dataset_d[cols].sum(axis=1).shift(1)
+dataset_d['sum_-2'] = dataset_d[cols].sum(axis=1).shift(2)
+dataset_d['sum_-3'] = dataset_d[cols].sum(axis=1).shift(3)
+dataset_d['sum_-4'] = dataset_d[cols].sum(axis=1).shift(4)
 
 # create lagged forecasts
-dataset_e['forc_-1'] = (dataset_e['forc_1_ms'].shift(1) + dataset_e['forc_2_ms'].shift(1) ) / 2
-dataset_e['forc_-2'] = (dataset_e['forc_1_ms'].shift(1) + dataset_e['forc_2_ms'].shift(2) ) / 2
-dataset_e['forc_-3'] = (dataset_e['forc_1_ms'].shift(1) + dataset_e['forc_2_ms'].shift(3) ) / 2
-dataset_e['forc_-4'] = (dataset_e['forc_1_ms'].shift(1) + dataset_e['forc_2_ms'].shift(4) ) / 2
+dataset_d['forc_-1'] = (dataset_d['forc_1_ms'].shift(1) + dataset_d['forc_2_ms'].shift(1) ) / 2
+dataset_d['forc_-2'] = (dataset_d['forc_1_ms'].shift(2) + dataset_d['forc_2_ms'].shift(2) ) / 2
+dataset_d['forc_-3'] = (dataset_d['forc_1_ms'].shift(3) + dataset_d['forc_2_ms'].shift(3) ) / 2
+dataset_d['forc_-4'] = (dataset_d['forc_1_ms'].shift(4) + dataset_d['forc_2_ms'].shift(4) ) / 2
+
+# create averages for some windows
+dataset_d['prod_avg_24h'] = dataset_d['prod_sum'].rolling(window=24).mean()
+dataset_d['prod_avg_7d']  = dataset_d['prod_sum'].rolling(window=24*7).mean()
+dataset_d['prod_avg_30d'] = dataset_d['prod_sum'].rolling(window=24*30).mean()
 
 # save to csv
-dataset_e.to_csv('data_processed/dataset_e.csv')
-
-
-
-
-### DATASET F: WITH LAGGED Forecasts ### ----------------------------------------------------
-
-# # copy dataset
-# dataset_f = dataset_e.copy()
-
-# # save to csv
-# dataset_f.to_csv('data_processed/dataset_f.csv')
-
-
-
-### OTHER DATASETS ### ----------------------------------------------------
-
-# add forecasts to df_wide and name new
-df_merged = pd.merge(forc_wide_transformed, forc_wide, left_on='datetime', right_on='datetime', how='left')
-df_merged = pd.merge(df_merged, prod_data, left_on='datetime', right_on='datetime', how='left')
-df_merged.to_csv('data_processed/data_merged.csv')
+dataset_d.to_csv('data_processed/dataset_d.csv')
